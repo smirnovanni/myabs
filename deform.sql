@@ -16,6 +16,50 @@ begin
 		
 end;
 
+procedure ClearContacts(P_STREAM_COUNT number(2,0), P_STREAM_NUM number(2,0)) is
+begin
+
+	declare
+		type Q_1 is
+			select a( a%rowid									: rid
+					, to_char( a, 'TM9' )						: id
+					)
+				in	::[CONTACTS] all
+			 where MOD(a%id,P_STREAM_COUNT) = P_STREAM_NUM;
+
+		type tp_cur is ref cursor return Q_1;
+		cur tp_cur;
+		
+		type tp_tab is table of Q_1;
+		tab tp_tab;
+	begin
+
+		cur.open(Q_1);
+		
+			cur.fetch(tab);
+	
+			update for j in tab exceptionloop
+				y	( y.[NUMB]	= to_char(y%id) )
+				in	::[CONTACTS] all
+			where	y%rowid = tab(j).rid;
+			commit;
+		
+		tab.delete;
+		cur.close;
+	end;
+	
+end;
+
+procedure RunCleanContacts(P_STREAMS number)
+is
+	text string(2000);
+begin
+	debug_pipe('START',0);
+	text := 'begin ::[CLIENT].[AKB_OBEZL].ClearContacts(P_STREAM_COUNT == P$S$C, P_STREAM_NUM == P$S$N); end;';
+	run_streams(text,P_STREAMS);
+	debug_pipe('OK',0);
+end;
+
 procedure CleanClPriv(P_STREAM_COUNT number(2,0), P_STREAM_NUM number(2,0)) is
 
 counter number;
@@ -54,10 +98,12 @@ begin
 		err_count integer;
 	begin
 		cur.open(Q_1);
+		--cur%lock;
 		counter	:= 0;
 
 		loop
-			cur.fetch_limit(5000, tab);		-- Выборка с лимитом
+			cur.fetch(tab);
+			--cur.fetch_limit(5000, tab);		-- Выборка с лимитом
 			exit when tab.count = 0;
 			
 			ri_tab.delete;
@@ -111,6 +157,177 @@ begin
 			where	y%id = tab(j).id;
 			commit;
 			&msg(TB$||TB$||' Поток '||to_char(P_STREAM_NUM+1)||' ...данные ::[CLIENT] деформированы. '||&lib.ShErr(BULK_EXCEPTIONS.count));
+
+			-- деформация данных об адресах
+			update for j in tab exceptionloop
+				y	( y.[FLAT] 			= '1'
+					, y.[HOUSE]			= '456'
+					, y.[KORPUS]		= 'Б'
+					, y.[POST_CODE]		= '654321'
+					, y.[STREET_STR]	= 'улица Неизвестного героя'
+					, y.[STREET_REF]	= null
+					, y.[IMP_STR]		= null
+					)
+				in	::[PERSONAL_ADDRESS] all
+			where	cast_to( [number], y%collection ) = tab(j).addr;
+			commit;
+			&msg(TB$||TB$||'...данные о клиентах - физических лиц деформированы. '||&lib.ShErr(BULK_EXCEPTIONS.count));
+
+			-- деформация данных о налоговых инспекциях
+			update for j in tab exceptionloop
+				y	( y.[INSPECTOR]		= 'Инспектор'
+					, y.[NOTES]			= null
+					)
+				in	::[TAX_INSP] all
+			where	cast_to( [number], y%collection ) = tab(j).inspect;
+			commit;
+			&msg(TB$||TB$||'...данные о налоговых инспекциях клиентов - физических лиц деформированы. '||&lib.ShErr(BULK_EXCEPTIONS.count));
+
+			-- деформация данных о доп. удостоверениях
+			tab_cert.delete;
+			for i in 1..tab.count loop
+				tab_cert(i) := tab(i).doc_arr;
+			end loop;
+			execute immediate '
+			begin
+				forall j in indices of :tab save exceptions
+				update Z#CERTIFICATE
+				set
+					SN = nvl(SN, 1) + 1, SU = rtl.uid$
+					, C_BIRTH_PLACE = ''_Место_ _рождения_ '' || :tab(j)
+					, C_NUM = ''1234567890''
+					, C_SER = ''XXYY''
+					, C_WHO = ''ПВС УВД МВД РБ''
+				where COLLECTION_ID = :tab(j);
+			end;'
+			using tab_cert;
+			commit;
+			&msg(TB$||TB$||'...данные о доп. удостоверениях клиентов - физических лиц деформированы. '||&lib.ShErr(BULK_EXCEPTIONS.count));
+
+			-- деформация данных о взаимосвязанных клиентах
+			update for j in tab exceptionloop
+				y	( y.[CLIENT_NAME]	= 'Взаимосвязь ' || tab(j).id )
+				in	::[LINKS_CL] all
+			where	cast_to( [number], y%collection ) = tab(j).links_other;
+			commit;
+			&msg(TB$||TB$||'...данные о доп. удостоверениях клиентов - физических лиц деформированы. '||&lib.ShErr(BULK_EXCEPTIONS.count));
+
+			var	dSysDate	date;
+			dSysDate	:= sysdate;
+
+			-- деформация данных о родственниках
+			/*
+			update for j in tab exceptionloop
+				y	( y.[NAME]				= 'Родственник '||tab(j).id
+					, y.[COGNATE_STATUS]	= rCognate
+					, y.[BIRTHDATE]			= dSysDate - random(36500)
+					, y.[RECOGNATE_STATUS]	= rCognate
+					, y.[DEPENDANT]			= null
+					, y.[SIGN_FAM]			= null
+					)
+				in	::[RELATIVES] all
+			where	cast_to( [number], y%collection ) = tab(j).rels;
+
+			&msg(TB$||TB$||'...данные о родственниках клиентов - физических лиц деформированы. '||&lib.ShErr(BULK_EXCEPTIONS.count));
+			commit;
+*/
+--			::[DATA_DEFORMATION].[LIB].DelAccBank(a.[ACC_BANK]);
+			-- деформация данных о счетах в банках
+			update for j in tab exceptionloop
+				y	( y.[ACC_BANKS]	= null )
+				in	::[AUR_DOCUM] all
+			where	y.[ACC_BANKS] in (select b(b)	in	::[BANKS_ACC] all
+															where	cast_to( [number], b%collection ) = tab(j).acc_bank);
+			commit;
+			&msg(TB$||TB$||TB$||'...[1/4]	"Хозяйственные договоры". '||&lib.ShErr(BULK_EXCEPTIONS.count));
+			
+			update for j in tab exceptionloop
+				y	( y.[ACC_BANKS]	= null )
+				in	::[CALENDAR_CALC] all
+			where	y.[ACC_BANKS]  in (select b(b)	in	::[BANKS_ACC] all
+															where	cast_to( [number], b%collection ) = tab(j).acc_bank);
+			
+			update for j in tab exceptionloop
+				y	( y.[ACC_ADD_RASH_FIL]	= null )
+				in	::[CALENDAR_CALC] all
+			where	y.[ACC_ADD_RASH_FIL]  in (select b(b)	in	::[BANKS_ACC] all
+															where	cast_to( [number], b%collection ) = tab(j).acc_bank);
+			
+			update for j in tab exceptionloop
+				y	( y.[ACC_GRT_RASH_FIL]	= null )
+				in	::[CALENDAR_CALC] all
+			where	y.[ACC_GRT_RASH_FIL]  in (select b(b)	in	::[BANKS_ACC] all
+															where	cast_to( [number], b%collection ) = tab(j).acc_bank);
+			
+			update for j in tab exceptionloop
+				y	( y.[ACC_RASHOD_FIL]	= null )
+				in	::[CALENDAR_CALC] all
+			where	y.[ACC_RASHOD_FIL]  in (select b(b)	in	::[BANKS_ACC] all
+															where	cast_to( [number], b%collection ) = tab(j).acc_bank);
+			commit;
+			&msg(TB$||TB$||TB$||'...[2/4]	"ТМЦ. Календарь расчетов". '||&lib.ShErr(BULK_EXCEPTIONS.count));
+
+			update for j in tab exceptionloop
+				y	( y.[ACC_BANKS]	= null )
+				in	::[TMC_ADD_AGR] all
+			where	 y.[ACC_BANKS] in (select b(b)	in	::[BANKS_ACC] all
+															where	cast_to( [number], b%collection ) = tab(j).acc_bank);
+			commit;
+			&msg(TB$||TB$||TB$||'...[3/4]	"ТМЦ. Дополнительные соглашения". '||&lib.ShErr(BULK_EXCEPTIONS.count));
+			
+
+			delete for j in tab exceptionloop
+				y	in	::[BANKS_ACC] all
+			where	cast_to( [number], y%collection ) = tab(j).acc_bank;
+			commit;
+			&msg(TB$||TB$||TB$||'...[4/4]	Очищен массив "Счета в банках". '||&lib.ShErr(BULK_EXCEPTIONS.count));
+
+
+			-- Контакты для связи
+			update for j in tab exceptionloop
+				y	( y.[NUMB]	= null )
+				in	::[CONTACTS] all
+			where	cast_to( [number], y%collection ) = tab(j).contacts;
+			commit;
+			&msg(TB$||TB$||'...данные о контактах клиентов - физических лиц деформированы. '||&lib.ShErr(BULK_EXCEPTIONS.count));
+
+			-- Склонения наименований
+			update for j in tab exceptionloop
+				y	( y.[NAME]	= null )
+				in	::[DECLENSION] all
+			where	cast_to( [number], y%collection ) = tab(j).decl_fio;
+			commit;
+			&msg(TB$||TB$||'...данные о склонений наименований клиентов - физических лиц деформированы. '||&lib.ShErr(BULK_EXCEPTIONS.count));
+
+			-- Допустимые наименования
+			update for j in tab exceptionloop
+				y	( y.[NAME]	= null )
+				in	::[NAMES] all
+			where	cast_to( [number], y%collection ) = tab(j).names;
+			commit;
+			&msg(TB$||TB$||'...данные о допустимых наименований клиентов - физических лиц деформированы. '||&lib.ShErr(BULK_EXCEPTIONS.count));
+
+			-- "Документы и изображения" - образцы печатей и подписей
+			delete for j in tab exceptionloop
+				y	in	::[DOSSIER_DOC] all
+			where	cast_to( [number], y%collection ) = tab(j).docs;
+			commit;
+			&msg(TB$||TB$||TB$||'...Очищен массив образцов печатей и подписей. '||&lib.ShErr(BULK_EXCEPTIONS.count));
+
+			-- резервирование - информация о клиенте
+			delete for j in tab exceptionloop
+				y	in	::[RES_CUST_INFO] all
+			where	cast_to( [number], y%collection ) = tab(j).res_info;
+			commit;
+			&msg(TB$||TB$||TB$||'...Очищен массив резервирования с информацией о клиенте. '||&lib.ShErr(BULK_EXCEPTIONS.count));
+
+			-- социальные фонды
+			delete for j in tab exceptionloop
+				y	in	::[SOC_FOUNDS] all
+			where	cast_to( [number], y%collection ) = tab(j).fonds;
+			commit;
+			&msg(TB$||TB$||TB$||'...Очищен массив с информацией о социальных фондах. '||&lib.ShErr(BULK_EXCEPTIONS.count));
+
 
 		exit when cur.notfound;
 		end loop;
