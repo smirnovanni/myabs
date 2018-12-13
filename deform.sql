@@ -712,7 +712,7 @@ begin
     execute immediate 'alter trigger "IBS"."LOG_Z#CONTACTS" disable';
     execute immediate 'alter trigger "IBS"."USR_Z#CONTACTS_MODIFY_DATE" disable';
 
-	v_text := '::[CLIENT].[BRK_DEFORMATION].[DeformContacts](P$S$C,P$S$N,'||to_char(p_commit)||');'||nl$;	
+	v_text := '::[CLIENT].[BRK_DEFORMATION].[DeformContacts](P$S$C,P$S$N,'||to_char(p_commit)||');'||nl$;
 	run_streams(v_text, p_count_strems, 'DeformContacts');
 	
     --Z#CONTACTS
