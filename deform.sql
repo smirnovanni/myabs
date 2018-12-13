@@ -661,18 +661,23 @@ procedure DeformContacts(P#STREAM#COUNT number(2,0), P#STREAM#NUM number(2,0), P
 begin
 
 	declare
+		
 		type Q_1 is
 			select a( a%rowid									: rid
 					, to_char( a, 'TM9' )						: id
 					)
 				in	::[CONTACTS] all
-			 where MOD(a%id,P#STREAM#COUNT) = P#STREAM#NUM;
-
+			 where MOD(a%id,P#STREAM#COUNT) = P#STREAM#NUM
+			   lock nowait(a);
+			   --lock nowait(a) skiplocked;
+		
 		type tp_cur is ref cursor return Q_1;
 		cur tp_cur;
-
+		type t_rowid_tab is table of rowid;
+		ri_tab t_rowid_tab;
 		type tp_tab is table of Q_1;
 		tab tp_tab;
+
 	begin
 		cur.open(Q_1);
 		counter	:= 0;
@@ -681,12 +686,33 @@ begin
 			cur.fetch_limit(P_COMMIT, tab);		-- Выборка с лимитом
 			exit when tab.count = 0;
 
-			-- Контакты для связи
-			update for j in tab exceptionloop
-				y	( y.[NUMB]	= substr(to_char(y%id),1,10) )
-				in	::[CONTACTS] all
-			where	y%id = tab(j).id;
+			ri_tab.delete;
+			for ri in 1..tab.count loop
+				ri_tab(ri) := tab(ri).RID;
+			end loop;			
+			
+			counter	:= counter + tab.count;
+
+			&msg(TB$||' Поток '||to_char(P#STREAM#NUM+1)||' информация о контактах прочитана в количестве: '||&lib.n2ch(tab.count,counter));
+
+			begin
+				execute immediate '
+				begin
+					forall j in indices of :tab save exceptions
+					update Z#CONTACTS set
+						SN = nvl(SN, 1) + 1, SU = rtl.uid$
+						, С_NUMB	= substr(to_char(ID),1,10) )
+						where ROWID = :tab(j);
+				exception when others then
+					if SQLCODE = -24381 then
+						:ec := SQL%BULK_EXCEPTIONS.count;
+					end if;
+				end;'
+				using ri_tab
+				;
+			end;
 			commit;
+
 			&msg(TB$||TB$||' Поток '||to_char(P#STREAM#NUM+1)||' ...данные о контактах клиентов - физических лиц деформированы. '||&lib.ShErr(BULK_EXCEPTIONS.count));
 			
 		exit when cur.notfound;
